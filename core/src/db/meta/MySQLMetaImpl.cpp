@@ -314,9 +314,9 @@ MySQLMetaImpl::Initialize() {
     }
 
     // step 3: connect mysql
-    int thread_hint = std::thread::hardware_concurrency();
-    int max_pool_size = (thread_hint == 0) ? 8 : thread_hint;
-    unsigned int port = 0;
+    unsigned int thread_hint = std::thread::hardware_concurrency();
+    int max_pool_size = (thread_hint > 8) ? thread_hint : 8;
+    int port = 0;
     if (!uri_info.port_.empty()) {
         port = std::stoi(uri_info.port_);
     }
@@ -582,7 +582,7 @@ MySQLMetaImpl::HasCollection(const std::string& collection_id, bool& has_or_not,
 }
 
 Status
-MySQLMetaImpl::AllCollections(std::vector<CollectionSchema>& collection_schema_array) {
+MySQLMetaImpl::AllCollections(std::vector<CollectionSchema>& collection_schema_array, bool is_root) {
     try {
         server::MetricCollector metric;
         mysqlpp::StoreQueryResult res;
@@ -599,8 +599,12 @@ MySQLMetaImpl::AllCollections(std::vector<CollectionSchema>& collection_schema_a
             mysqlpp::Query statement = connectionPtr->query();
             statement << "SELECT id, table_id, dimension, engine_type, index_params, index_file_size, metric_type"
                       << " ,owner_table, partition_tag, version, flush_lsn"
-                      << " FROM " << META_TABLES << " WHERE state <> " << std::to_string(CollectionSchema::TO_DELETE)
-                      << " AND owner_table = \"\";";
+                      << " FROM " << META_TABLES << " WHERE state <> " << std::to_string(CollectionSchema::TO_DELETE);
+            if (is_root) {
+                statement << " AND owner_table = \"\";";
+            } else {
+                statement << ";";
+            }
 
             LOG_ENGINE_DEBUG_ << "AllCollections: " << statement.str();
 
@@ -1535,8 +1539,8 @@ MySQLMetaImpl::ShowPartitions(const std::string& collection_id,
 
             mysqlpp::Query statement = connectionPtr->query();
             statement << "SELECT table_id, id, state, dimension, created_on, flag, index_file_size,"
-                      << " engine_type, index_params, metric_type, partition_tag, version FROM " << META_TABLES
-                      << " WHERE owner_table = " << mysqlpp::quote << collection_id << " AND state <> "
+                      << " engine_type, index_params, metric_type, partition_tag, version, flush_lsn FROM "
+                      << META_TABLES << " WHERE owner_table = " << mysqlpp::quote << collection_id << " AND state <> "
                       << std::to_string(CollectionSchema::TO_DELETE) << ";";
 
             LOG_ENGINE_DEBUG_ << "ShowPartitions: " << statement.str();
@@ -1559,6 +1563,7 @@ MySQLMetaImpl::ShowPartitions(const std::string& collection_id,
             partition_schema.owner_collection_ = collection_id;
             resRow["partition_tag"].to_string(partition_schema.partition_tag_);
             resRow["version"].to_string(partition_schema.version_);
+            partition_schema.flush_lsn_ = resRow["flush_lsn"];
 
             partition_schema_array.emplace_back(partition_schema);
         }
@@ -1709,7 +1714,7 @@ MySQLMetaImpl::FilesToSearchEx(const std::string& root_collection, const std::se
         // distribute id array to batchs
         const int64_t batch_size = 50;
         std::vector<std::vector<std::string>> id_groups;
-        std::vector<std::string> temp_group = {root_collection};
+        std::vector<std::string> temp_group;
         int64_t count = 1;
         for (auto& id : partition_id_array) {
             temp_group.push_back(id);
@@ -1734,6 +1739,8 @@ MySQLMetaImpl::FilesToSearchEx(const std::string& root_collection, const std::se
                 mysqlpp::ScopedConnection connectionPtr(*mysql_connection_pool_, safe_grab_);
 
                 bool is_null_connection = (connectionPtr == nullptr);
+                fiu_do_on("MySQLMetaImpl.FilesToSearch.null_connection", is_null_connection = true);
+                fiu_do_on("MySQLMetaImpl.FilesToSearch.throw_exception", throw std::exception(););
                 if (is_null_connection) {
                     return Status(DB_ERROR, "Failed to connect to meta server(mysql)");
                 }
@@ -1845,7 +1852,7 @@ MySQLMetaImpl::FilesToMerge(const std::string& collection_id, FilesHolder& files
         for (auto& resRow : res) {
             SegmentSchema collection_file;
             collection_file.file_size_ = resRow["file_size"];
-            if (collection_file.file_size_ >= collection_schema.index_file_size_) {
+            if ((int64_t)(collection_file.file_size_) >= collection_schema.index_file_size_) {
                 continue;  // skip large file
             }
 
@@ -2755,6 +2762,7 @@ MySQLMetaImpl::SetGlobalLastLSN(uint64_t lsn) {
             }
 
             bool first_create = false;
+            uint64_t last_lsn = 0;
             {
                 mysqlpp::StoreQueryResult res;
                 mysqlpp::Query statement = connectionPtr->query();
@@ -2762,6 +2770,8 @@ MySQLMetaImpl::SetGlobalLastLSN(uint64_t lsn) {
                 res = statement.store();
                 if (res.num_rows() == 0) {
                     first_create = true;
+                } else {
+                    last_lsn = res[0]["global_lsn"];
                 }
             }
 
@@ -2773,7 +2783,7 @@ MySQLMetaImpl::SetGlobalLastLSN(uint64_t lsn) {
                 if (!statement.exec()) {
                     return HandleException("QUERY ERROR WHEN SET GLOBAL LSN", statement.error());
                 }
-            } else {
+            } else if (lsn > last_lsn) {
                 mysqlpp::Query statement = connectionPtr->query();
                 statement << "UPDATE " << META_ENVIRONMENT << " SET global_lsn = " << lsn << ";";
                 LOG_ENGINE_DEBUG_ << "SetGlobalLastLSN: " << statement.str();
@@ -2783,8 +2793,6 @@ MySQLMetaImpl::SetGlobalLastLSN(uint64_t lsn) {
                 }
             }
         }  // Scoped Connection
-
-        LOG_ENGINE_DEBUG_ << "Successfully update global_lsn: " << lsn;
     } catch (std::exception& e) {
         return HandleException("Failed to set global lsn", e.what());
     }
@@ -3001,6 +3009,7 @@ MySQLMetaImpl::DescribeHybridCollection(CollectionSchema& collection_schema, hyb
 
 Status
 MySQLMetaImpl::CreateHybridCollectionFile(milvus::engine::meta::SegmentSchema& file_schema) {
+    return Status::OK();
 }
 
 }  // namespace meta
