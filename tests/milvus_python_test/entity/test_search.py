@@ -1,73 +1,86 @@
+import time
 import pdb
-import struct
-from random import sample
-
-import pytest
+import copy
 import threading
-import datetime
 import logging
-from time import sleep
-from multiprocessing import Process
-import numpy
-import sklearn.preprocessing
+from multiprocessing import Pool, Process
+import pytest
 from milvus import IndexType, MetricType
 from utils import *
 
 dim = 128
-collection_id = "test_search"
-add_interval_time = 2
-vectors = gen_vectors(6000, dim)
-vectors = sklearn.preprocessing.normalize(vectors, axis=1, norm='l2')
-vectors = vectors.tolist()
+segment_size = 10
+collection_id = "search"
+tag = "1970-01-01"
+insert_interval_time = 1.5
+nb = 6000
 top_k = 1
 nprobe = 1
 epsilon = 0.001
-tag = "1970-01-01"
-raw_vectors, binary_vectors = gen_binary_vectors(6000, dim)
+field_name = "float_vector"
+default_index_name = "insert_index"
+entity = gen_entities(1, is_normal=True)
+binary_entity = gen_binary_entities(1)
+entities = gen_entities(nb, is_normal=True)
+raw_vectors, binary_entities = gen_binary_entities(nb)
+# query = {
+#     "bool": {
+#         "must": [
+#             {"term": {"A": {"values": [1, 2, 5]}}},
+#             {"range": {"B": {"ranges": {"GT": 1, "LT": 100}}}},
+#             {"vector": {"Vec": {"topk": 10, "query": vec[: 1], "params": {"index_name": "IVFFLAT", "nprobe": 10}}}}
+#         ],
+#     },
+# }
+
+def get_query_inside(entities, top_k, nq, search_params={"nprobe": 10}):
+    query_vectors = entities[-1]["values"][:nq]
+    query = {
+        "bool": {
+            "must": [
+                {"vector": {field_name: {"topk": top_k, "query": query_vectors, "params": search_params}}}
+            ]
+        }
+    }
+    return query
 
 
 class TestSearchBase:
     def init_data(self, connect, collection, nb=6000, partition_tags=None):
         '''
-        Generate vectors and add it in collection, before search vectors
+        Generate entities and add it in collection
         '''
-        global vectors
+        global entities
         if nb == 6000:
-            add_vectors = vectors
+            insert_entities = entities
         else:  
-            add_vectors = gen_vectors(nb, dim)
-            add_vectors = sklearn.preprocessing.normalize(add_vectors, axis=1, norm='l2')
-            add_vectors = add_vectors.tolist()
+            insert_entities = gen_entities(nb, is_normal=True)
         if partition_tags is None:
-            status, ids = connect.insert(collection, add_vectors)
-            assert status.OK()
+            ids = connect.insert(collection, insert_entities)
         else:
-            status, ids = connect.insert(collection, add_vectors, partition_tag=partition_tags)
-            assert status.OK()
+            ids = connect.insert(collection, insert_entities, partition_tag=partition_tags)
         connect.flush([collection])
-        return add_vectors, ids
+        return insert_entities, ids
 
     def init_binary_data(self, connect, collection, nb=6000, insert=True, partition_tags=None):
         '''
-        Generate vectors and add it in collection, before search vectors
+        Generate entities and add it in collection
         '''
         ids = []
-        global binary_vectors
+        global binary_entities
         global raw_vectors
         if nb == 6000:
-            add_vectors = binary_vectors
-            add_raw_vectors = raw_vectors
+            insert_entities = binary_entities
+            insert_raw_vectors = raw_vectors
         else:  
-            add_raw_vectors, add_vectors = gen_binary_vectors(nb, dim)
+            insert_raw_vectors, insert_entities = gen_binary_entities(nb)
         if insert is True:
             if partition_tags is None:
-                status, ids = connect.insert(collection, add_vectors)
-                assert status.OK()
+                ids = connect.insert(collection, add_vectors)
             else:
-                status, ids = connect.insert(collection, add_vectors, partition_tag=partition_tags)
-                assert status.OK()
+                ids = connect.insert(collection, add_vectors, partition_tag=partition_tags)
             connect.flush([collection])
-        return add_raw_vectors, add_vectors, ids
+        return insert_raw_vectors, insert_entities, ids
 
     """
     generate valid create_index params
@@ -78,11 +91,8 @@ class TestSearchBase:
     )
     def get_index(self, request, connect):
         if str(connect._cmd("mode")[1]) == "CPU":
-            if request.param["index_type"] == IndexType.IVF_SQ8H:
+            if request.param["index_type"] == "IVFSQ8H":
                 pytest.skip("sq8h not support in CPU mode")
-        if str(connect._cmd("mode")[1]) == "GPU":
-            if request.param["index_type"] == IndexType.IVF_PQ:
-                pytest.skip("ivfpq not support in GPU mode")
         return request.param
 
     @pytest.fixture(
@@ -91,11 +101,8 @@ class TestSearchBase:
     )
     def get_simple_index(self, request, connect):
         if str(connect._cmd("mode")[1]) == "CPU":
-            if request.param["index_type"] == IndexType.IVF_SQ8H:
+            if request.param["index_type"] == "IVFSQ8H":
                 pytest.skip("sq8h not support in CPU mode")
-        if str(connect._cmd("mode")[1]) == "GPU":
-            if request.param["index_type"] == IndexType.IVF_PQ:
-                pytest.skip("ivfpq not support in GPU mode")
         return request.param
 
     @pytest.fixture(
@@ -104,7 +111,7 @@ class TestSearchBase:
     )
     def get_jaccard_index(self, request, connect):
         logging.getLogger().info(request.param)
-        if request.param["index_type"] == IndexType.IVFLAT or request.param["index_type"] == IndexType.FLAT:
+        if request.param["index_type"] in ["IVFFLAT", "FLAT"]:
             return request.param
         else:
             pytest.skip("Skip index Temporary")
@@ -115,7 +122,7 @@ class TestSearchBase:
     )
     def get_hamming_index(self, request, connect):
         logging.getLogger().info(request.param)
-        if request.param["index_type"] == IndexType.IVFLAT or request.param["index_type"] == IndexType.FLAT:
+        if request.param["index_type"] in ["IVFFLAT", "FLAT"]:
             return request.param
         else:
             pytest.skip("Skip index Temporary")
@@ -126,7 +133,7 @@ class TestSearchBase:
     )
     def get_structure_index(self, request, connect):
         logging.getLogger().info(request.param)
-        if request.param["index_type"] == IndexType.FLAT:
+        if request.param["index_type"] == "FLAT":
             return request.param
         else:
             pytest.skip("Skip index Temporary")
@@ -146,25 +153,28 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, change top-k value
         method: search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
-        vectors, ids = self.init_data(connect, collection)
-        query_vec = [vectors[0]]
         top_k = get_top_k
-        status, result = connect.search(collection, top_k, query_vec)
+        entities, ids = self.init_data(connect, collection)
+        query = get_query_inside(entities, top_k, 1)
         if top_k <= 2048:
-            assert status.OK()
-            assert len(result[0]) == min(len(vectors), top_k)
-            assert result[0][0].distance <= epsilon
-            assert check_result(result[0], ids[0])
+            logging.getLogger().info(query)
+            res = connect.search(collection, query)
+            logging.getLogger().info(res)
+            assert len(res[0]) == top_k
+            assert res[0][0].distance <= epsilon
+            assert check_result(res[0], ids[0])
         else:
-            assert not status.OK()
+            with pytest.raises(Exception) as e:
+                res = connect.search(collection, query)
+
 
     def test_search_l2_index_params(self, connect, collection, get_simple_index):
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -191,7 +201,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -215,7 +225,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: add vectors into collection, search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k, search collection with partition tag return empty
+        expected: the length of the result is top_k, search collection with partition tag return empty
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -243,7 +253,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search partition with the given vectors, check the result
-        expected: search status ok, and the length of the result is 0
+        expected: the length of the result is 0
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -266,7 +276,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -296,7 +306,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors and tags (one of the tags not existed in collection), check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         index_param = get_simple_index["index_param"]
         index_type = get_simple_index["index_type"]
@@ -321,7 +331,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors and tag (tag name not existed in collection), check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         index_param = get_simple_index["index_param"]
         index_type = get_simple_index["index_type"]
@@ -341,7 +351,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search collection with the given vectors and tags, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         top_k = 10
         new_tag = "new_tag"
@@ -376,7 +386,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search collection with the given vectors and tags with "re" expr, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         tag = "atag"
         new_tag = "new_tag"
@@ -409,7 +419,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -433,7 +443,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         index_param = get_simple_index["index_param"]
         index_type = get_simple_index["index_type"]
@@ -459,7 +469,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -489,7 +499,7 @@ class TestSearchBase:
         '''
         target: test basic search fuction, all the search params is corrent, test all index params, and build
         method: search with the given vectors and tag, check the result
-        expected: search status ok, and the length of the result is top_k
+        expected: the length of the result is top_k
         '''
         top_k = 10
         index_param = get_simple_index["index_param"]
@@ -585,7 +595,7 @@ class TestSearchBase:
         nb = 2
         nprobe = 1
         vectors, ids = self.init_data(connect, ip_collection, nb=nb)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -607,7 +617,7 @@ class TestSearchBase:
         # from scipy.spatial import distance
         nprobe = 512
         int_vectors, vectors, ids = self.init_binary_data(connect, jac_collection, nb=2)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -632,7 +642,7 @@ class TestSearchBase:
         # from scipy.spatial import distance
         nprobe = 512
         int_vectors, vectors, ids = self.init_binary_data(connect, ham_collection, nb=2)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -657,7 +667,7 @@ class TestSearchBase:
         # from scipy.spatial import distance
         nprobe = 512
         int_vectors, vectors, ids = self.init_binary_data(connect, substructure_collection, nb=2)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -683,7 +693,7 @@ class TestSearchBase:
         top_k = 3
         nprobe = 512
         int_vectors, vectors, ids = self.init_binary_data(connect, substructure_collection, nb=2)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -711,7 +721,7 @@ class TestSearchBase:
         # from scipy.spatial import distance
         nprobe = 512
         int_vectors, vectors, ids = self.init_binary_data(connect, superstructure_collection, nb=2)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -737,7 +747,7 @@ class TestSearchBase:
         top_k = 3
         nprobe = 512
         int_vectors, vectors, ids = self.init_binary_data(connect, superstructure_collection, nb=2)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -765,7 +775,7 @@ class TestSearchBase:
         # from scipy.spatial import distance
         nprobe = 512
         int_vectors, vectors, ids = self.init_binary_data(connect, tanimoto_collection, nb=2)
-        index_type = IndexType.FLAT
+        index_type = "FLAT"
         index_param = {
             "nlist": 16384
         }
@@ -844,7 +854,7 @@ class TestSearchBase:
         uri = "tcp://%s:%s" % (args["ip"], args["port"])
         param = {'collection_name': collection,
                  'dimension': dim,
-                 'index_type': IndexType.FLAT,
+                 'index_type': "FLAT",
                  'store_raw_vector': False}
         # create collection
         milvus = get_milvus(args["ip"], args["port"], handler=args["handler"])
@@ -883,7 +893,7 @@ class TestSearchBase:
         uri = "tcp://%s:%s" % (args["ip"], args["port"])
         param = {'collection_name': collection,
              'dimension': dim,
-             'index_type': IndexType.FLAT,
+             'index_type': "FLAT",
              'store_raw_vector': False}
         # create collection
         milvus = get_milvus(args["ip"], args["port"], handler=args["handler"])
@@ -1016,7 +1026,7 @@ class TestSearchParamsInvalid(object):
     """
     @pytest.fixture(
         scope="function",
-        params=gen_invalid_collection_names()
+        params=gen_invalid_strs()
     )
     def get_collection_name(self, request):
         yield request.param
@@ -1051,7 +1061,7 @@ class TestSearchParamsInvalid(object):
     """
     @pytest.fixture(
         scope="function",
-        params=gen_invalid_top_ks()
+        params=gen_invalid_ints()
     )
     def get_top_k(self, request):
         yield request.param
@@ -1096,7 +1106,7 @@ class TestSearchParamsInvalid(object):
     """
     @pytest.fixture(
         scope="function",
-        params=gen_invalid_nprobes()
+        params=gen_invalid_ints()
     )
     def get_nprobes(self, request):
         yield request.param
@@ -1150,7 +1160,7 @@ class TestSearchParamsInvalid(object):
     )
     def get_simple_index(self, request, connect):
         if str(connect._cmd("mode")[1]) == "CPU":
-            if request.param["index_type"] == IndexType.IVF_SQ8H:
+            if request.param["index_type"] == "IVFSQ8H":
                 pytest.skip("sq8h not support in CPU mode")
         if str(connect._cmd("mode")[1]) == "GPU":
             if request.param["index_type"] == IndexType.IVF_PQ:
@@ -1171,7 +1181,7 @@ class TestSearchParamsInvalid(object):
         query_vecs = gen_vectors(1, dim)
         status, result = connect.search(collection, top_k, query_vecs, params={})
 
-        if index_type == IndexType.FLAT:
+        if index_type == "FLAT":
             assert status.OK()
         else:
             assert not status.OK()
@@ -1182,7 +1192,7 @@ class TestSearchParamsInvalid(object):
     )
     def get_invalid_search_param(self, request, connect):
         if str(connect._cmd("mode")[1]) == "CPU":
-            if request.param["index_type"] == IndexType.IVF_SQ8H:
+            if request.param["index_type"] == "IVFSQ8H":
                 pytest.skip("sq8h not support in CPU mode")
         if str(connect._cmd("mode")[1]) == "GPU":
             if request.param["index_type"] == IndexType.IVF_PQ:
