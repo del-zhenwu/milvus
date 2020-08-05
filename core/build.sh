@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 BUILD_OUTPUT_DIR="cmake_build"
 BUILD_TYPE="Debug"
 BUILD_UNITTEST="OFF"
