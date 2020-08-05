@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 # Compile jobs variable; Usage: $ jobs=12 ./build.sh ...
 if [[ ! ${jobs+1} ]]; then
     jobs=$(nproc)
