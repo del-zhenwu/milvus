@@ -14,6 +14,8 @@
 #include "codecs/Codec.h"
 #include "db/Utils.h"
 #include "db/meta/MetaFactory.h"
+#include "db/meta/condition/MetaFilter.h"
+#include "db/meta/condition/MetaRelation.h"
 #include "db/snapshot/ResourceContext.h"
 #include "db/snapshot/ResourceHelper.h"
 #include "db/snapshot/ResourceTypes.h"
@@ -31,6 +33,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -176,6 +179,21 @@ class Store : public std::enable_shared_from_this<Store> {
     GetInActiveResources(std::vector<typename ResourceT::Ptr>& return_vs) {
         std::vector<State> filter_states = {State::PENDING, State::DEACTIVE};
         return adapter_->SelectBy<ResourceT>(StateField::Name, filter_states, return_vs);
+    }
+
+    template <typename ResourceT>
+    Status
+    GetActiveResourcesByAttrs(std::vector<typename ResourceT::Ptr>& return_vs,
+                              const std::vector<std::string>& target_attrs, int64_t upper_bound, int64_t low_bound) {
+        std::vector<State> filter_states = {State::ACTIVE};
+        auto relation = meta::ONE_(meta::Range_<ResourceT, StateField>(meta::Range::EQ, State::ACTIVE));
+        if (upper_bound < std::numeric_limits<TS_TYPE>::max()) {
+            relation = meta::AND_(relation, meta::Range_<ResourceT, UpdatedOnField>(meta::Range::LTE, upper_bound));
+        }
+        if (low_bound > std::numeric_limits<TS_TYPE>::min()) {
+            relation = meta::AND_(relation, meta::Range_<ResourceT, UpdatedOnField>(meta::Range::GTE, low_bound));
+        }
+        return adapter_->Query<ResourceT>(relation, return_vs);
     }
 
     template <typename ResourceT>

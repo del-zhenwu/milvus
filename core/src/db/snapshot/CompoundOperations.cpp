@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "db/meta/MetaAdapter.h"
+#include "db/meta/MetaResourceAttrs.h"
 #include "db/snapshot/IterateHandler.h"
 #include "db/snapshot/OperationExecutor.h"
 #include "db/snapshot/ResourceContext.h"
@@ -935,14 +936,16 @@ GetSnapshotIDsOperation::GetIDs() const {
     return ids_;
 }
 
-GetAllActiveSnapshotIDsOperation::GetAllActiveSnapshotIDsOperation()
-    : BaseT(OperationContext(), ScopedSnapshotT(), OperationsType::O_Compound) {
+GetAllActiveSnapshotIDsOperation::GetAllActiveSnapshotIDsOperation(const RangeContext& context)
+    : BaseT(OperationContext(), ScopedSnapshotT(), OperationsType::O_Compound), updated_time_range_(context) {
 }
 
 Status
 GetAllActiveSnapshotIDsOperation::DoExecute(StorePtr store) {
     std::vector<CollectionCommitPtr> ccs;
-    STATUS_CHECK(store->GetActiveResources<CollectionCommit>(ccs));
+    STATUS_CHECK(store->GetActiveResourcesByAttrs<CollectionCommit>(
+        ccs, {meta::F_ID, meta::F_COLLECTON_ID}, updated_time_range_.upper_bound_, updated_time_range_.low_bound_));
+
     for (auto& cc : ccs) {
         auto cid = cc->GetCollectionId();
         auto it = cid_ccid_.find(cid);
@@ -951,6 +954,7 @@ GetAllActiveSnapshotIDsOperation::DoExecute(StorePtr store) {
         } else {
             cid_ccid_[cid] = std::max(it->second, cc->GetID());
         }
+        latest_update_ = std::max(latest_update_, cc->GetUpdatedTime());
     }
     return Status::OK();
 }

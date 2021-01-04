@@ -34,6 +34,13 @@ class MetaAdapter {
 
     template <typename T>
     Status
+    Query(const MetaCombinationPtr filter, std::vector<typename T::Ptr>& resources) {
+        auto session = CreateSession();
+        return session->Query<T>(filter, resources);
+    }
+
+    template <typename T>
+    Status
     Select(int64_t id, typename T::Ptr& resource) {
         // TODO move select logic to here
         auto session = CreateSession();
@@ -52,6 +59,14 @@ class MetaAdapter {
     SelectBy(const std::string& field, const std::vector<U>& values, std::vector<typename ResourceT::Ptr>& resources) {
         auto session = CreateSession();
         return session->Select<ResourceT, U>(field, values, {}, resources);
+    }
+
+    template <typename ResourceT, typename U>
+    Status
+    SelectByAttrs(const std::string& field, const std::vector<U>& values, const std::vector<std::string>& target_attrs,
+                  std::vector<typename ResourceT::Ptr>& resources) {
+        auto session = CreateSession();
+        return session->Select<ResourceT, U>(field, values, target_attrs, resources);
     }
 
     template <typename ResourceT, typename U>
