@@ -433,7 +433,7 @@ class TestGetBase:
             assert_equal_vector(res[i].get(default_float_vec_field_name), default_entities[-1]["values"][i])
 
     @pytest.mark.level(2)
-    def test_get_entities_indexed_single(self, connect, collection, get_simple_index, get_pos):
+    def _test_get_entities_indexed_single(self, connect, collection, get_simple_index, get_pos):
         '''
         target: test.get_entity_by_id
         method: add entities 1 entity/per request, create index, get
